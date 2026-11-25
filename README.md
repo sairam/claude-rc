@@ -13,7 +13,7 @@ rc stop <repo>                   stop it
 rc ls                            running Remote Control instances and how many sessions each has
 rc task <repo> "<task>"          start one session now, in a new worktree, with the task as its first message
 rc tasks                         task sessions that are open
-rc sessions [<repo>]             every Claude session recorded in ~/.rc: running or stopped, name, link
+rc sessions [<repo>]             every Claude session rc recorded: running or stopped, name, link
 rc resume <id|name>              bring back a stopped session with its full history
 rc forget <id>                   drop a session record
 rc attach [<window>]             look at an instance or a task in tmux (detach with Ctrl-b d)
@@ -31,7 +31,7 @@ rc doctor                        check tmux, git, claude, python3 and your Claud
 ```bash
 brew install tmux                       # git and python3 come with the Xcode command line tools (python3 is required)
 git clone https://github.com/sairam/claude-rc.git ~/dev/claude-rc
-~/dev/claude-rc/install.sh                     # symlink ~/.local/bin/rc, create ~/.rc/config, run rc doctor
+~/dev/claude-rc/install.sh                     # symlink ~/.local/bin/rc, create the config, run rc doctor
 ```
 
 You also need Claude Code (`claude`) and a login (`claude`, then `/login`).
@@ -64,9 +64,9 @@ tmux window (session `rc-tasks`). Claude makes a new worktree (branch
 under that name, so you can follow it and answer from your phone. `rc attach <window>`
 shows it in the terminal.
 
-## Sessions are kept in `~/.rc/`
+## Sessions are kept
 
-rc records every Claude session on your computer in `~/.rc/sessions.json`: id, folder
+rc records every Claude session on your computer in `sessions.json` (in the rc folder, below): id, folder
 (worktree), repo, branch, name, claude.ai link, and the task text for `rc task`.
 `rc task` records its session before it starts (it gives Claude the id with
 `--session-id`); the others are picked up from `~/.claude/sessions/` once a minute while
@@ -96,18 +96,20 @@ sees that question, so `rc open` stops and tells you. Then do one of these:
 
 ## Settings
 
-Everything rc keeps is in `~/.rc/` (set `RC_DIR` to move it):
+Everything rc keeps is in one folder: `~/.config/rc` when `~/.config` exists (as on most
+Macs), else `~/.rc`. Set `RC_DIR` to use another folder.
 
-| Path | What |
+| File | What |
 |---|---|
-| `~/.rc/config` | settings (bash, all optional; see `config.example`) |
-| `~/.rc/projects.txt` | pinned repos, one path per line |
-| `~/.rc/sessions.json` | session records |
-| `~/.rc/logs/autostart.log` | output of `rc up` at login |
+| `config` | settings (bash, all optional; see `config.example`) |
+| `projects.txt` | pinned repos, one path per line |
+| `sessions.json` | session records |
+| `logs/autostart.log` | output of `rc up` at login |
 
-The first release kept its files in `~/.config/rc`; rc moves them to `~/.rc` on first run.
+If you used a version that kept them in `~/.rc` and `~/.config` exists, rc moves them to
+`~/.config/rc` on first run.
 
-Settings in `~/.rc/config`:
+Settings in `config`:
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -132,7 +134,7 @@ Remote Control can only answer while your Mac is awake. To keep it awake on powe
 |---|---|
 | `rc` | the command (bash 3.2, the version macOS ships) |
 | `rc-loop.sh` | keeps one `claude remote-control` running for a repo; restarts it when it exits; records sessions every minute |
-| `lib/sessions.py` | session records in `~/.rc/sessions.json` (save, list, resume lookup, forget) |
+| `lib/sessions.py` | session records in `sessions.json` (save, list, resume lookup, forget) |
 | `install.sh` | symlinks `rc` into `~/.local/bin` and creates the config |
 | `config.example` | settings template |
 | `launchd/rc-up.plist` | template for `rc autostart on` |

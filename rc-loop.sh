@@ -2,7 +2,7 @@
 # Keeps one `claude remote-control` running for a repo. Started by `rc open` inside tmux
 # (session "rc", one window per repo). If Remote Control exits (Claude updated itself,
 # network dropped, the Mac slept too long) it starts again after 5 s.
-# While it runs, every Claude session on this computer is recorded in ~/.rc/sessions.json
+# While it runs, every Claude session on this computer is recorded in sessions.json (~/.config/rc or ~/.rc)
 # once a minute (`rc save`), so `rc sessions` / `rc resume` know them after they stop.
 #   usage: rc-loop.sh <dir> <name> [permission-mode]
 # Git repos get --spawn worktree (each remote session in its own git worktree);

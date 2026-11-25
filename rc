@@ -8,7 +8,7 @@
 #   rc ls                            running Remote Control instances
 #   rc task <repo> "<task>"          start ONE session now in a new worktree, with the task as its first message
 #   rc tasks                         task sessions that are open
-#   rc sessions [<repo>]             every Claude session recorded in ~/.rc: running or stopped, name, link
+#   rc sessions [<repo>]             every Claude session rc recorded: running or stopped, name, link
 #   rc resume <id|name>              bring back a stopped session (full history, new claude.ai link)
 #   rc forget <id>                   drop a session record
 #   rc attach [<window>]             look at a repo or task window in tmux (detach: Ctrl-b d)
@@ -19,15 +19,25 @@
 #   rc doctor                        check that tmux, git, claude, python3 are installed and you are logged in
 #
 # <repo> = a path, or a folder name under $RC_DEV (default ~/dev).
-# Everything rc keeps is in ~/.rc/: config, projects.txt (pins), sessions.json, logs/.
+# Everything rc keeps (config, projects.txt = pins, sessions.json, logs/) is in ~/.config/rc,
+# or in ~/.rc on a computer without ~/.config.
 # Works with the bash 3.2 that macOS ships (no bash 4 features).
 set -euo pipefail
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 RC_HOME=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" 2>/dev/null && pwd)
-RC_DIR=${RC_DIR:-$HOME/.rc}
-# one-time move from the first release, which kept its files in ~/.config/rc
-if [ ! -e "$RC_DIR" ] && [ -d "$HOME/.config/rc" ]; then mv "$HOME/.config/rc" "$RC_DIR"; fi
+# Where rc keeps its files: ~/.config/rc when ~/.config exists, else ~/.rc (RC_DIR overrides both).
+# A ~/.rc left by an earlier release moves to ~/.config/rc once ~/.config is there.
+if [ -z "${RC_DIR:-}" ]; then
+  if [ -d "$HOME/.config" ]; then
+    RC_DIR=$HOME/.config/rc
+    if [ ! -e "$RC_DIR" ] && [ -f "$HOME/.rc/sessions.json" -o -f "$HOME/.rc/projects.txt" -o -f "$HOME/.rc/config" ]; then
+      mv "$HOME/.rc" "$RC_DIR"
+    fi
+  else
+    RC_DIR=$HOME/.rc
+  fi
+fi
 mkdir -p "$RC_DIR/logs"
 [ -f "$RC_DIR/config" ] && . "$RC_DIR/config"
 export RC_DIR

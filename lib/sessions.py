@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""rc session records, kept in ~/.rc/sessions.json (one entry per Claude conversation).
+"""rc session records, kept in <rc dir>/sessions.json (~/.config/rc, or ~/.rc without ~/.config) (one entry per Claude conversation).
 
 Claude Code writes ~/.claude/sessions/<pid>.json for every running session (id, folder, name, and
 bridgeSessionId = the claude.ai/code link when Remote Control is on). `save` copies every one of
-them into ~/.rc/sessions.json, so they are still listed after they stop, and `resume` can
+them into sessions.json, so they are still listed after they stop, and `resume` can
 bring one back with its full history.
 
   sessions.py save                    record live sessions (rc-loop.sh runs this every minute)
@@ -15,7 +15,9 @@ Records not seen running for 30 days are dropped.
 """
 import glob, json, os, re, subprocess, sys, tempfile, time
 
-RC_DIR = os.environ.get("RC_DIR") or os.path.expanduser("~/.rc")
+# same rule as rc: ~/.config/rc when ~/.config exists, else ~/.rc (RC_DIR overrides)
+RC_DIR = os.environ.get("RC_DIR") or (os.path.expanduser("~/.config/rc") if os.path.isdir(os.path.expanduser("~/.config"))
+                                      else os.path.expanduser("~/.rc"))
 STORE = os.path.join(RC_DIR, "sessions.json")
 LIVE = os.path.expanduser("~/.claude/sessions")
 KEEP_DAYS = 30

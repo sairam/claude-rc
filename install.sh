@@ -1,11 +1,12 @@
 #!/bin/bash
 # Puts `rc` on your PATH as a symlink to this checkout (so `git pull` updates it).
-# rc keeps everything else in ~/.rc/ (config, pins, session records, logs).
+# rc keeps everything else in ~/.config/rc (or ~/.rc without ~/.config): config, pins, sessions, logs.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 bin=${1:-$HOME/.local/bin}
-rcdir=${RC_DIR:-$HOME/.rc}
-if [ ! -e "$rcdir" ] && [ -d "$HOME/.config/rc" ]; then mv "$HOME/.config/rc" "$rcdir"; fi
+if [ -n "${RC_DIR:-}" ]; then rcdir=$RC_DIR
+elif [ -d "$HOME/.config" ]; then rcdir=$HOME/.config/rc
+else rcdir=$HOME/.rc; fi
 mkdir -p "$bin" "$rcdir/logs"
 ln -sf "$here/rc" "$bin/rc"
 [ -f "$rcdir/config" ] || cp "$here/config.example" "$rcdir/config"

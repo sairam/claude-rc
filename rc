@@ -1,0 +1,274 @@
+#!/bin/bash
+# rc — run Claude Code Remote Control for your local git repos, so you can open a repo
+# and work on tasks from claude.ai/code or the Claude app (phone, another computer).
+#
+#   rc repos                         repos under $RC_DEV: branch, uncommitted changes, running or not
+#   rc open|start [--trust] <repo>   start Remote Control for a repo (every session gets its own worktree)
+#   rc stop <repo>                   stop it
+#   rc ls                            running Remote Control instances
+#   rc task <repo> "<task>"          start ONE session now in a new worktree, with the task as its first message
+#   rc tasks                         task sessions that are open
+#   rc attach [<window>]             look at a repo or task window in tmux (detach: Ctrl-b d)
+#   rc pin|unpin <repo>              keep a repo always running (`rc up` starts pinned repos)
+#   rc up                            start every pinned repo that is not running
+#   rc trust <repo>                  mark a folder trusted for Claude (same as answering its trust prompt)
+#   rc autostart on|off              run `rc up` when you log in (launchd agent)
+#   rc doctor                        check that tmux, git, claude, python3 are installed and you are logged in
+#
+# <repo> = a path, or a folder name under $RC_DEV (default ~/dev). Settings: ~/.config/rc/config
+# Works with the bash 3.2 that macOS ships (no bash 4 features).
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+RC_HOME=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" 2>/dev/null && pwd)
+CONF_DIR=${RC_CONFIG_DIR:-$HOME/.config/rc}
+[ -f "$CONF_DIR/config" ] && . "$CONF_DIR/config"
+DEV=${RC_DEV:-$HOME/dev}
+PINNED=$CONF_DIR/projects.txt
+SESSION=${RC_TMUX_SESSION:-rc}          # tmux session for Remote Control instances (one window per repo)
+TASKS=${RC_TMUX_TASKS:-rc-tasks}        # tmux session for `rc task` (one window per task)
+PERMISSION_MODE=${RC_PERMISSION_MODE:-} # e.g. acceptEdits, plan; empty = Claude's own default
+LOOP=$RC_HOME/rc-loop.sh
+AGENT_LABEL=${RC_LAUNCHD_LABEL:-dev.rc.up}
+
+die()  { echo "rc: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is not installed ($2)"; }
+
+abspath() { (cd "$1" 2>/dev/null && pwd -P); }
+
+resolve_dir() {
+  local a=$1 d
+  for d in "$a" "$DEV/$a"; do
+    [ -d "$d" ] && { abspath "$d"; return; }
+  done
+  die "no such repo: $a (looked in . and $DEV)"
+}
+
+# current working directory of a pid (lsof on macOS, /proc on Linux)
+pid_cwd() {
+  if [ -r "/proc/$1/cwd" ]; then readlink "/proc/$1/cwd"
+  else lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; fi
+}
+
+rc_pids() { pgrep -f '^claude remote-control' 2>/dev/null || true; }
+
+# pid of the Remote Control running in <dir>, if any
+rc_pid() {
+  local dir=$1 p
+  for p in $(rc_pids); do
+    [ "$(pid_cwd "$p")" = "$dir" ] && { echo "$p"; return; }
+  done
+}
+
+window_name() { basename "$1" | tr '.:' '__'; }   # tmux treats . and : as separators
+
+cmd_ls() {
+  local p dir up n
+  printf "%-28s %-10s %-8s %s\n" REPO UPTIME SESSIONS DIR
+  for p in $(rc_pids); do
+    dir=$(pid_cwd "$p")
+    up=$(ps -o etime= -p "$p" | tr -d ' ')
+    n=$( (pgrep -P "$p" 2>/dev/null || true) | wc -l | tr -d ' ')
+    printf "%-28s %-10s %-8s %s\n" "$(basename "$dir")" "$up" "$n" "$dir"
+  done
+}
+
+cmd_repos() {
+  local g dir br dirty run
+  [ -d "$DEV" ] || die "$DEV does not exist (set RC_DEV in $CONF_DIR/config)"
+  printf "%-28s %-30s %-6s %s\n" REPO BRANCH DIRTY RUNNING
+  find "$DEV" -mindepth 2 -maxdepth 3 -name .git -prune 2>/dev/null | sort | while read -r g; do
+    dir=$(dirname "$g")
+    br=$(git -C "$dir" branch --show-current 2>/dev/null || true)
+    dirty=$( [ -n "$(git -C "$dir" status --porcelain 2>/dev/null | head -1)" ] && echo yes || echo - )
+    run=$( [ -n "$(rc_pid "$(abspath "$dir")")" ] && echo yes || echo - )
+    printf "%-28s %-30s %-6s %s\n" "${dir#$DEV/}" "${br:-?}" "$dirty" "$run"
+  done
+}
+
+cmd_start() {
+  local trust=0
+  [ "${1:-}" = --trust ] && { trust=1; shift; }
+  [ $# -ge 1 ] || die "usage: rc open [--trust] <repo>"
+  need tmux "brew install tmux"; need claude "https://code.claude.com/docs"
+  local dir name p
+  dir=$(resolve_dir "$1"); name=$(window_name "$dir")
+  [ $trust = 1 ] && trust_dir "$dir"
+  if [ -n "$(rc_pid "$dir")" ]; then echo "$name already running"; return; fi
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || echo "note: $dir is not a git repo, so sessions share the folder (no worktrees)"
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-window -t "$SESSION:$name" 2>/dev/null || true
+    tmux new-window -d -t "$SESSION:" -n "$name" "$LOOP" "$dir" "$name" "$PERMISSION_MODE"
+  else
+    tmux new-session -d -s "$SESSION" -n "$name" "$LOOP" "$dir" "$name" "$PERMISSION_MODE"
+  fi
+  for _ in $(seq 20); do [ -n "$(rc_pid "$dir")" ] && break; sleep 1; done
+  p=$(rc_pid "$dir")
+  [ -n "$p" ] || { tmux capture-pane -p -t "$SESSION:$name" | tail -20; die "$name did not start"; }
+  sleep 4
+  if tmux capture-pane -p -t "$SESSION:$name" | grep -qi 'trust'; then
+    tmux capture-pane -p -t "$SESSION:$name" | tail -15
+    die "$name is waiting on Claude's folder-trust prompt. Answer it once:
+    rc attach $name      # answer, then detach with Ctrl-b d
+  or run: rc trust $name && rc stop $name && rc open $name"
+  fi
+  echo "$name started (pid $p). Open claude.ai/code or the Claude app and pick \"$name\"."
+}
+
+cmd_stop() {
+  [ $# -ge 1 ] || die "usage: rc stop <repo>"
+  local dir name p
+  dir=$(resolve_dir "$1"); name=$(window_name "$dir")
+  tmux kill-window -t "$SESSION:$name" 2>/dev/null || true   # stop the restart loop first
+  p=$(rc_pid "$dir")
+  if [ -n "$p" ]; then
+    kill -INT "$p"
+    for _ in $(seq 30); do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+    kill -0 "$p" 2>/dev/null && kill -TERM "$p"
+  fi
+  echo "$name stopped"
+}
+
+slug() {  # first words of the task, lowercase, dashes, max 40 chars
+  printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-*//; s/-*$//'
+}
+
+cmd_task() {
+  [ $# -ge 2 ] || die 'usage: rc task <repo> "<what to do>"'
+  need tmux "brew install tmux"; need claude "https://code.claude.com/docs"
+  local dir repo task s win; local -a mode; mode=()
+  dir=$(resolve_dir "$1"); shift; task="$*"
+  repo=$(window_name "$dir")
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$dir is not a git repo (a task needs a worktree)"
+  s=$(slug "$task"); [ -n "$s" ] || s=task
+  s="$s-$(date +%H%M%S)"
+  win="$repo:$s"; win=$(printf '%s' "$win" | tr '.:' '__')
+  [ -n "$PERMISSION_MODE" ] && mode=(--permission-mode "$PERMISSION_MODE")
+  # -w: new git worktree (branch worktree-<slug>) under .claude/worktrees; --remote-control: show it in claude.ai/code
+  local cmd
+  cmd=$(printf '%q ' claude -w "$s" --remote-control "$repo · $s" ${mode[@]+"${mode[@]}"} "$task")
+  if tmux has-session -t "$TASKS" 2>/dev/null; then
+    tmux new-window -d -t "$TASKS:" -n "$win" -c "$dir" "$cmd; echo; echo '[session ended, press Enter]'; read _"
+  else
+    tmux new-session -d -s "$TASKS" -n "$win" -c "$dir" "$cmd; echo; echo '[session ended, press Enter]'; read _"
+  fi
+  echo "task started: \"$repo · $s\" (worktree branch worktree-$s)"
+  echo "  open it in claude.ai/code or the Claude app, or here: rc attach $win"
+}
+
+cmd_tasks() {
+  tmux list-windows -t "$TASKS" -F '#{window_name}  #{pane_current_path}' 2>/dev/null || echo "no task sessions"
+}
+
+cmd_attach() {
+  need tmux "brew install tmux"
+  local w=${1:-}
+  if [ -z "$w" ]; then tmux attach -t "$SESSION" 2>/dev/null || tmux attach -t "$TASKS"; return; fi
+  if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$w"; then tmux attach -t "$SESSION:$w"
+  elif tmux list-windows -t "$TASKS" -F '#W' 2>/dev/null | grep -qx "$w"; then tmux attach -t "$TASKS:$w"
+  else die "no window named $w (see rc ls / rc tasks)"; fi
+}
+
+# Mark <dir> trusted in ~/.claude.json: the flag Claude's own folder-trust prompt sets.
+# Only for folders you chose (rc trust, rc pin, rc open --trust).
+trust_dir() {
+  need python3 "xcode-select --install"
+  python3 - "$1" <<'PY'
+import json, os, sys, tempfile
+p = os.path.expanduser("~/.claude.json")
+d = json.load(open(p)) if os.path.exists(p) else {}
+proj = d.setdefault("projects", {}).setdefault(sys.argv[1], {})
+if proj.get("hasTrustDialogAccepted") is True:
+    sys.exit(0)
+proj["hasTrustDialogAccepted"] = True
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p), prefix=".claude.json.rc-")
+with os.fdopen(fd, "w") as f:
+    json.dump(d, f, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, p)
+print(f"trusted {sys.argv[1]}")
+PY
+}
+
+cmd_trust() { [ $# -ge 1 ] || die "usage: rc trust <repo>"; trust_dir "$(resolve_dir "$1")"; }
+
+pinned() { [ -f "$PINNED" ] && grep -v '^[[:space:]]*\(#\|$\)' "$PINNED" | awk '{print $1}' || true; }
+
+cmd_pin() {
+  [ $# -ge 1 ] || die "usage: rc pin <repo>"
+  local dir; dir=$(resolve_dir "$1")
+  mkdir -p "$CONF_DIR"
+  pinned | grep -qx "$dir" && { echo "$(basename "$dir") already pinned"; return; }
+  echo "$dir" >> "$PINNED"; echo "pinned $dir"
+  trust_dir "$dir"
+}
+
+cmd_unpin() {
+  [ $# -ge 1 ] || die "usage: rc unpin <repo>"
+  local dir; dir=$(resolve_dir "$1")
+  [ -f "$PINNED" ] || return 0
+  grep -vx "$dir" "$PINNED" > "$PINNED.tmp" || true; mv "$PINNED.tmp" "$PINNED"
+  echo "unpinned $dir (still running until \`rc stop $(basename "$dir")\`)"
+}
+
+cmd_up() {  # one failure (e.g. a trust prompt) must not stop the others
+  local dir rc=0
+  for dir in $(pinned); do
+    [ -d "$dir" ] || { echo "skip $dir (missing)"; continue; }
+    ( cmd_start --trust "$dir" ) || rc=1
+  done
+  return $rc
+}
+
+cmd_autostart() {
+  [ "$(uname)" = Darwin ] || die "autostart uses launchd (macOS only)"
+  local plist="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+  case ${1:-} in
+    on)
+      mkdir -p "$HOME/Library/LaunchAgents" "$CONF_DIR"
+      sed -e "s|__LABEL__|$AGENT_LABEL|g" -e "s|__RC__|$RC_HOME/rc|g" -e "s|__LOG__|$CONF_DIR/autostart.log|g" \
+          -e "s|__HOME__|$HOME|g" "$RC_HOME/launchd/rc-up.plist" > "$plist"
+      launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$plist"
+      echo "rc up will run at login ($plist, log $CONF_DIR/autostart.log)" ;;
+    off)
+      launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
+      rm -f "$plist"; echo "autostart off" ;;
+    *) die "usage: rc autostart on|off" ;;
+  esac
+}
+
+cmd_doctor() {
+  local ok=1 t
+  for t in tmux git claude python3; do
+    if command -v "$t" >/dev/null 2>&1; then printf "ok   %-8s %s\n" "$t" "$(command -v "$t")"
+    else printf "MISS %s\n" "$t"; ok=0; fi
+  done
+  echo "repos folder: $DEV $( [ -d "$DEV" ] && echo '(ok)' || echo '(missing: set RC_DEV)')"
+  echo "pinned:       $(pinned | wc -l | tr -d ' ') repo(s) in $PINNED"
+  if command -v claude >/dev/null 2>&1; then
+    claude auth status >/dev/null 2>&1 && echo "claude login: ok" || { echo "claude login: run \`claude\` and /login"; ok=0; }
+  fi
+  [ $ok = 1 ]
+}
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case ${1:-} in
+  repos)      shift; cmd_repos ;;
+  ls|list)    shift; cmd_ls ;;
+  open|start) shift; cmd_start "$@" ;;
+  stop)       shift; cmd_stop "$@" ;;
+  task)       shift; cmd_task "$@" ;;
+  tasks)      shift; cmd_tasks ;;
+  attach)     shift; cmd_attach "$@" ;;
+  trust)      shift; cmd_trust "$@" ;;
+  pin)        shift; cmd_pin "$@" ;;
+  unpin)      shift; cmd_unpin "$@" ;;
+  up)         shift; cmd_up ;;
+  autostart)  shift; cmd_autostart "$@" ;;
+  doctor)     shift; cmd_doctor ;;
+  -h|--help|help|"") usage ;;
+  *) usage; exit 1 ;;
+esac

@@ -1,0 +1,11 @@
+# ~/.config/rc/config — sourced by rc (bash). All optional.
+
+# Folder that holds your repos; `rc open myrepo` looks for $RC_DEV/myrepo
+RC_DEV="$HOME/dev"
+
+# Permission mode for new sessions: acceptEdits, auto, plan, default, dontAsk (empty = Claude's default)
+RC_PERMISSION_MODE=""
+
+# tmux session names
+# RC_TMUX_SESSION=rc
+# RC_TMUX_TASKS=rc-tasks

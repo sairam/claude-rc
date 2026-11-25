@@ -107,4 +107,5 @@ Remote Control can only answer while your Mac is awake. To keep it awake on powe
 
 ## License
 
-MIT
+Public domain ([Unlicense](https://unlicense.org/)): no copyright, use it for anything.
+Written by Claude Code from requirements by sairam.

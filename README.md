@@ -27,8 +27,8 @@ rc doctor                        check tmux, git, claude, python3 and your Claud
 
 ```bash
 brew install tmux                       # git and python3 come with the Xcode command line tools
-git clone https://github.com/<you>/<this-repo>.git ~/dev/rc
-~/dev/rc/install.sh                     # symlink ~/.local/bin/rc, create ~/.config/rc/config, run rc doctor
+git clone https://github.com/sairam/claude-rc.git ~/dev/claude-rc
+~/dev/claude-rc/install.sh                     # symlink ~/.local/bin/rc, create ~/.config/rc/config, run rc doctor
 ```
 
 You also need Claude Code (`claude`) and a login (`claude`, then `/login`).

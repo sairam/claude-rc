@@ -1,4 +1,4 @@
-# ~/.config/rc/config — sourced by rc (bash). All optional.
+# ~/.rc/config — sourced by rc (bash). All optional.
 
 # Folder that holds your repos; `rc open myrepo` looks for $RC_DEV/myrepo
 RC_DEV="$HOME/dev"

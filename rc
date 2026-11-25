@@ -8,6 +8,9 @@
 #   rc ls                            running Remote Control instances
 #   rc task <repo> "<task>"          start ONE session now in a new worktree, with the task as its first message
 #   rc tasks                         task sessions that are open
+#   rc sessions [<repo>]             every Claude session recorded in ~/.rc: running or stopped, name, link
+#   rc resume <id|name>              bring back a stopped session (full history, new claude.ai link)
+#   rc forget <id>                   drop a session record
 #   rc attach [<window>]             look at a repo or task window in tmux (detach: Ctrl-b d)
 #   rc pin|unpin <repo>              keep a repo always running (`rc up` starts pinned repos)
 #   rc up                            start every pinned repo that is not running
@@ -15,16 +18,22 @@
 #   rc autostart on|off              run `rc up` when you log in (launchd agent)
 #   rc doctor                        check that tmux, git, claude, python3 are installed and you are logged in
 #
-# <repo> = a path, or a folder name under $RC_DEV (default ~/dev). Settings: ~/.config/rc/config
+# <repo> = a path, or a folder name under $RC_DEV (default ~/dev).
+# Everything rc keeps is in ~/.rc/: config, projects.txt (pins), sessions.json, logs/.
 # Works with the bash 3.2 that macOS ships (no bash 4 features).
 set -euo pipefail
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 RC_HOME=$(cd "$(dirname "$(readlink "$0" || echo "$0")")" 2>/dev/null && pwd)
-CONF_DIR=${RC_CONFIG_DIR:-$HOME/.config/rc}
-[ -f "$CONF_DIR/config" ] && . "$CONF_DIR/config"
+RC_DIR=${RC_DIR:-$HOME/.rc}
+# one-time move from the first release, which kept its files in ~/.config/rc
+if [ ! -e "$RC_DIR" ] && [ -d "$HOME/.config/rc" ]; then mv "$HOME/.config/rc" "$RC_DIR"; fi
+mkdir -p "$RC_DIR/logs"
+[ -f "$RC_DIR/config" ] && . "$RC_DIR/config"
+export RC_DIR
 DEV=${RC_DEV:-$HOME/dev}
-PINNED=$CONF_DIR/projects.txt
+PINNED=$RC_DIR/projects.txt
+SESSIONS=$RC_HOME/lib/sessions.py
 SESSION=${RC_TMUX_SESSION:-rc}          # tmux session for Remote Control instances (one window per repo)
 TASKS=${RC_TMUX_TASKS:-rc-tasks}        # tmux session for `rc task` (one window per task)
 PERMISSION_MODE=${RC_PERMISSION_MODE:-} # e.g. acceptEdits, plan; empty = Claude's own default
@@ -75,7 +84,7 @@ cmd_ls() {
 
 cmd_repos() {
   local g dir br dirty run
-  [ -d "$DEV" ] || die "$DEV does not exist (set RC_DEV in $CONF_DIR/config)"
+  [ -d "$DEV" ] || die "$DEV does not exist (set RC_DEV in $RC_DIR/config)"
   printf "%-28s %-30s %-6s %s\n" REPO BRANCH DIRTY RUNNING
   find "$DEV" -mindepth 2 -maxdepth 3 -name .git -prune 2>/dev/null | sort | while read -r g; do
     dir=$(dirname "$g")
@@ -146,14 +155,17 @@ cmd_task() {
   win="$repo:$s"; win=$(printf '%s' "$win" | tr '.:' '__')
   [ -n "$PERMISSION_MODE" ] && mode=(--permission-mode "$PERMISSION_MODE")
   # -w: new git worktree (branch worktree-<slug>) under .claude/worktrees; --remote-control: show it in claude.ai/code
-  local cmd
-  cmd=$(printf '%q ' claude -w "$s" --remote-control "$repo · $s" ${mode[@]+"${mode[@]}"} "$task")
+  local cmd sid
+  sid=$(new_uuid)
+  # recorded before it starts, so `rc sessions` / `rc resume` know it even if it stops at once
+  python3 "$SESSIONS" add "$sid" "$dir/.claude/worktrees/$s" "$repo · $s" "$task"
+  cmd=$(printf '%q ' claude -w "$s" --session-id "$sid" --remote-control "$repo · $s" ${mode[@]+"${mode[@]}"} "$task")
   if tmux has-session -t "$TASKS" 2>/dev/null; then
     tmux new-window -d -t "$TASKS:" -n "$win" -c "$dir" "$cmd; echo; echo '[session ended, press Enter]'; read _"
   else
     tmux new-session -d -s "$TASKS" -n "$win" -c "$dir" "$cmd; echo; echo '[session ended, press Enter]'; read _"
   fi
-  echo "task started: \"$repo · $s\" (worktree branch worktree-$s)"
+  echo "task started: \"$repo · $s\" (session ${sid%%-*}, worktree branch worktree-$s)"
   echo "  open it in claude.ai/code or the Claude app, or here: rc attach $win"
 }
 
@@ -168,6 +180,41 @@ cmd_attach() {
   if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qx "$w"; then tmux attach -t "$SESSION:$w"
   elif tmux list-windows -t "$TASKS" -F '#W' 2>/dev/null | grep -qx "$w"; then tmux attach -t "$TASKS:$w"
   else die "no window named $w (see rc ls / rc tasks)"; fi
+}
+
+new_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'
+  else python3 -c 'import uuid; print(uuid.uuid4())'; fi
+}
+
+cmd_resume() {
+  [ $# -ge 1 ] || die "usage: rc resume <id-prefix|name>  (see rc sessions)"
+  need tmux "brew install tmux"; need claude "https://code.claude.com/docs"
+  local line sid dir repo br name win cmd
+  line=$(python3 "$SESSIONS" get "$1") || exit 1
+  IFS=$'\x1f' read -r sid dir repo br name <<< "$line"
+  if [ ! -d "$dir" ]; then
+    # the worktree was removed: make it again at the same path (Claude finds a conversation by its folder)
+    case $dir in
+      */.claude/worktrees/*)
+        if [ -n "$br" ] && git -C "$repo" rev-parse --verify -q "$br" >/dev/null; then
+          git -C "$repo" worktree add -q "$dir" "$br"
+        else
+          br=${br:-rc-resumed-$(date +%Y%m%d-%H%M%S)}
+          git -C "$repo" worktree add -q -b "$br" "$dir"
+        fi
+        echo "recreated worktree $dir (branch $br)" ;;
+      *) die "folder $dir is gone; cannot resume ${sid%%-*}" ;;
+    esac
+  fi
+  win=$(printf '%s' "resume-${sid%%-*}" | tr '.:' '__')
+  cmd=$(printf '%q ' claude --resume "$sid" --remote-control "$name")
+  if tmux has-session -t "$TASKS" 2>/dev/null; then
+    tmux new-window -d -t "$TASKS:" -n "$win" -c "$dir" "$cmd; echo; echo '[session ended, press Enter]'; read _"
+  else
+    tmux new-session -d -s "$TASKS" -n "$win" -c "$dir" "$cmd; echo; echo '[session ended, press Enter]'; read _"
+  fi
+  echo "resumed \"$name\" (${sid%%-*}) in tmux $TASKS:$win; it has a new link in claude.ai/code (same name)"
 }
 
 # Mark <dir> trusted in ~/.claude.json: the flag Claude's own folder-trust prompt sets.
@@ -198,7 +245,6 @@ pinned() { [ -f "$PINNED" ] && grep -v '^[[:space:]]*\(#\|$\)' "$PINNED" | awk '
 cmd_pin() {
   [ $# -ge 1 ] || die "usage: rc pin <repo>"
   local dir; dir=$(resolve_dir "$1")
-  mkdir -p "$CONF_DIR"
   pinned | grep -qx "$dir" && { echo "$(basename "$dir") already pinned"; return; }
   echo "$dir" >> "$PINNED"; echo "pinned $dir"
   trust_dir "$dir"
@@ -226,12 +272,12 @@ cmd_autostart() {
   local plist="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
   case ${1:-} in
     on)
-      mkdir -p "$HOME/Library/LaunchAgents" "$CONF_DIR"
-      sed -e "s|__LABEL__|$AGENT_LABEL|g" -e "s|__RC__|$RC_HOME/rc|g" -e "s|__LOG__|$CONF_DIR/autostart.log|g" \
+      mkdir -p "$HOME/Library/LaunchAgents"
+      sed -e "s|__LABEL__|$AGENT_LABEL|g" -e "s|__RC__|$RC_HOME/rc|g" -e "s|__LOG__|$RC_DIR/logs/autostart.log|g" \
           -e "s|__HOME__|$HOME|g" "$RC_HOME/launchd/rc-up.plist" > "$plist"
       launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$plist"
-      echo "rc up will run at login ($plist, log $CONF_DIR/autostart.log)" ;;
+      echo "rc up will run at login ($plist, log $RC_DIR/logs/autostart.log)" ;;
     off)
       launchctl bootout "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null || true
       rm -f "$plist"; echo "autostart off" ;;
@@ -253,7 +299,7 @@ cmd_doctor() {
   [ $ok = 1 ]
 }
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case ${1:-} in
   repos)      shift; cmd_repos ;;
@@ -269,6 +315,10 @@ case ${1:-} in
   up)         shift; cmd_up ;;
   autostart)  shift; cmd_autostart "$@" ;;
   doctor)     shift; cmd_doctor ;;
+  sessions)   shift; exec python3 "$SESSIONS" list "$@" ;;
+  save)       shift; exec python3 "$SESSIONS" save ;;
+  resume)     shift; cmd_resume "$@" ;;
+  forget)     shift; exec python3 "$SESSIONS" forget "$@" ;;
   -h|--help|help|"") usage ;;
   *) usage; exit 1 ;;
 esac
